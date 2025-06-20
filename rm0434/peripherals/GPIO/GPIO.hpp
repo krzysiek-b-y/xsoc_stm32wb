@@ -66,17 +66,22 @@ public:
         low = static_cast<std::uint32_t>(ll::gpio::ODR::low),
         high = static_cast<std::uint32_t>(ll::gpio::ODR::high)
     };
+    // Alternative to Input_value_enum_dictionary: Define 'Type' via 'using'
+    // to satisfy checks like std::is_same<Type, ll::gpio::OTYPER::Flag>.
+    // using Type = ll::gpio::OTYPER::Flag;
     enum class Type : std::uint32_t
     {
         push_pull = static_cast<std::uint32_t>(ll::gpio::OTYPER::push_pull),
         open_drain = static_cast<std::uint32_t>(ll::gpio::OTYPER::open_drain),
     };
+    // using Pull = ll::gpio::PUPDR::Flag;
     enum class Pull : std::uint32_t
     {
         none = static_cast<std::uint32_t>(ll::gpio::PUPDR::none),
         up = static_cast<std::uint32_t>(ll::gpio::PUPDR::pull_up),
         down = static_cast<std::uint32_t>(ll::gpio::PUPDR::pull_down),
     };
+    // using Speed  = ll::gpio::OSPEEDR::Flag;
     enum class Speed : std::uint32_t
     {
         low = static_cast<std::uint32_t>(ll::gpio::OSPEEDR::low),

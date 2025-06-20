@@ -11,9 +11,70 @@
 #include <soc/st/arm/IRQ_config.hpp>
 #include <soc/st/arm/m4/nvic.hpp>
 #include <xmcu/bit.hpp>
+#include <xmcu/various.hpp>
 
 // debug
 #include <xmcu/assertion.hpp>
+
+// TODO move to a more suitable location
+namespace utils {
+class BitfieldMultiplicator
+{
+public:
+    struct MaskCreator
+    {
+        size_t width, multiplier;
+        consteval MaskCreator(size_t width, size_t submask = 1)
+            : width(width)
+            , multiplier(multiplier_mask(width, submask))
+        {
+        }
+        static void break_compilation_execution();
+        static consteval size_t multiplier_mask(size_t width, size_t submask = 1)
+        {
+            if (0 == width) break_compilation_execution();
+            if (0 == submask) break_compilation_execution();
+            size_t result = 0;
+            do
+            {
+                result |= submask;
+            } while (submask <<= width); // shift right operation is going to zero
+            return result;
+        }
+        constexpr size_t generate_multiplier(uint8_t start, uint8_t end) const
+        {
+            const std::uint32_t full_word_width = this->width * (1 + end - start);
+            const std::uint32_t mask_from_lower_bit = (1 << full_word_width) - 1;
+            const std::size_t mask = mask_from_lower_bit << start * this->width;
+            return mask & this->multiplier;
+        }
+    };
+    constexpr BitfieldMultiplicator(MaskCreator mask_creator, uint8_t start, uint8_t end)
+        : overflow_trigger(1 << mask_creator.width)
+        , multiplier(mask_creator.generate_multiplier(start, end))
+    {
+    }
+    constexpr size_t apply_value(size_t a_value) const
+    {
+        if (overflow_trigger < a_value) // to avoid constexpr execution
+            hkm_assert(a_value < overflow_trigger);
+        return a_value * this->multiplier;
+    }
+
+private:
+    const size_t overflow_trigger;
+    const size_t multiplier;
+};
+
+namespace static_test {
+static_assert(BitfieldMultiplicator::MaskCreator(4).multiplier > 0, "err" );
+static_assert(BitfieldMultiplicator(4, 2, 3).apply_value(1) == 0x001100, "err");
+static_assert(BitfieldMultiplicator(4, 2, 3).apply_value(2) == 0x002200, "err");
+// static_assert(BitfieldMultiplicator(4, 2, 3).apply_value(250) > 0, "err");
+static_assert(BitfieldMultiplicator(4, 2, 4).apply_value(4) == 0x044400, "err");
+// static_assert(BitfieldMultiplicator::MaskCreator(0).mask == 0, "err" );
+} // namespace static_test
+} // namespace utils
 
 namespace {
 using namespace xmcu::soc::st::arm::m4::wb::rm0434::peripherals;
@@ -97,6 +158,75 @@ void EXTI15_10_IRQHandler()
         }
     }
 }
+}
+
+// As an alternative to "merge" enum to one type by `using` statement.
+template<typename T> struct Input_value_enum_dictionary
+{
+};
+template<> struct Input_value_enum_dictionary<ll::gpio::OTYPER::Flag>
+{
+    using source_enum = GPIO::Type;
+};
+template<> struct Input_value_enum_dictionary<ll::gpio::PUPDR::Flag>
+{
+    using source_enum = GPIO::Pull;
+};
+template<> struct Input_value_enum_dictionary<ll::gpio::OSPEEDR::Flag>
+{
+    using source_enum = GPIO::Speed;
+};
+
+template<typename T>
+concept BusRegister = requires {
+    typename T::base_desc_t;
+    typename T::Data;
+    typename T::Flag;
+    typename Input_value_enum_dictionary<typename T::Flag>::source_enum;
+} && requires(decltype(T::base_desc_t::shift_multiplier) a) {
+    { a * 1 };
+} && requires(decltype(T::base_desc_t::mask) a) {
+    { a * 1 };
+};
+
+template<BusRegister T> class BusMul : public ::utils::BitfieldMultiplicator
+{
+public:
+    BusMul(uint8_t start, uint8_t end)
+        : ::utils::BitfieldMultiplicator(T::base_desc_t::shift_multiplier, start, end)
+    {
+    }
+    T::Data get_mask()
+    {
+        return static_cast<T::Data>(this->::utils::BitfieldMultiplicator::apply_value(T::base_desc_t::mask));
+    }
+    T::Data apply_value(T::Flag a_value)
+    {
+        return static_cast<T::Data>(this->::utils::BitfieldMultiplicator::apply_value(various::to_underlying(a_value)));
+    }
+
+    // Note: The dictionary used below is a bit of a hack.
+    T::Data apply_value(Input_value_enum_dictionary<typename T::Flag>::source_enum a_value)
+    {
+        return static_cast<T::Data>(this->::utils::BitfieldMultiplicator::apply_value(various::to_underlying(a_value)));
+    }
+};
+
+consteval void test_pull()
+{
+    using Pull = GPIO::Pull;
+    constexpr utils::BitfieldMultiplicator cxpr_mul(ll::gpio::PUPDR::base_desc_t::shift_multiplier, 3, 7);
+    constexpr unsigned pull_value = various::to_underlying(Pull::down);
+    constexpr unsigned bit_weight = ll::gpio::PUPDR::base_desc_t::shift_multiplier;
+
+    static_assert(cxpr_mul.apply_value(various::to_underlying(Pull::none)) == 0, "");
+
+    static_assert(cxpr_mul.apply_value(various::to_underlying(Pull::down)) ==
+                      (pull_value << bit_weight * 3 | pull_value << bit_weight * 4 | pull_value << bit_weight * 5 |
+                       pull_value << bit_weight * 6 | pull_value << bit_weight * 7),
+                  "");
+
+    static_assert(cxpr_mul.apply_value(ll::gpio::PUPDR::base_desc_t::mask) == 0xFFC0, "");
 }
 
 namespace xmcu::soc::st::arm::m4::wb::rm0434::peripherals {
@@ -217,42 +347,33 @@ void GPIO::Out::Bus::set_value(std::uint32_t a_value)
     this->p_port->p_registers->bsrr = static_cast<ll::gpio::BSRR::Data>(sr_val);
 }
 
-// TODO: parallel write to configuration registers
-
 void GPIO::Out::Bus::set_type(Type a_type)
 {
     hkm_assert(nullptr != this->p_port && 0xFFu != this->id_start && 0xFFu != this->id_end);
-
-    for (std::int32_t id = this->id_start; id <= this->id_end; ++id)
-    {
-        bit::flag::set(&(this->p_port->p_registers->otyper),
-                       ll::gpio::OTYPER::mask << id,
-                       static_cast<ll::gpio::OTYPER::Flag>(a_type) << id);
-    }
+    BusMul<ll::gpio::OTYPER> mul(this->id_start, this->id_end);
+    bit::flag::set(&this->p_port->p_registers->otyper, mul.get_mask(), mul.apply_value(a_type));
 }
 
 void GPIO::Out::Bus::set_pull(Pull a_pull)
 {
     hkm_assert(nullptr != this->p_port && 0xFFu != this->id_start && 0xFFu != this->id_end);
+    // Example without the BusMul template:
+    utils::BitfieldMultiplicator mul(ll::gpio::PUPDR::base_desc_t::shift_multiplier, this->id_start, this->id_end);
+    auto multiplicated_value =
+    mul.apply_value(various::to_underlying(a_pull));
+    auto mask = mul.apply_value(ll::gpio::PUPDR::base_desc_t::mask);
 
-    for (std::int32_t id = this->id_start; id <= this->id_end; ++id)
-    {
-        bit::flag::set(&(this->p_port->p_registers->pupdr),
-                       ll::gpio::PUPDR::mask << (id * 2u),
-                       static_cast<ll::gpio::PUPDR::Flag>(a_pull) << (id * 2));
-    }
+    bit::flag::set(&this->p_port->p_registers->pupdr,
+                   static_cast<ll::gpio::PUPDR::Data>(mask),
+                   static_cast<ll::gpio::PUPDR::Data>(multiplicated_value));
 }
 
 void GPIO::Out::Bus::set_speed(Speed a_speed)
 {
     hkm_assert(nullptr != this->p_port && 0xFFu != this->id_start && 0xFFu != this->id_end);
+    BusMul<ll::gpio::OSPEEDR> mul(this->id_start, this->id_end);
 
-    for (std::int32_t id = this->id_start; id <= this->id_end; ++id)
-    {
-        bit::flag::set(&(this->p_port->p_registers->ospeedr),
-                       ll::gpio::OSPEEDR::mask << id,
-                       static_cast<ll::gpio::OSPEEDR::Flag>(a_speed) << id);
-    }
+    bit::flag::set(&(this->p_port->p_registers->ospeedr), mul.get_mask(), mul.apply_value(a_speed));
 }
 
 void GPIO::Analog::Pin::set_pull(Pull a_pull)

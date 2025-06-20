@@ -78,6 +78,10 @@ struct gpio_pupdr_descriptor : private xmcu::non_constructible
         none = 0x0u,
         pull_up = 0x1u,
         pull_down = 0x2u,
+        // due to differences with enum:
+        // xmcu::soc::st::arm::m4::wb::rm0434::peripherals::ll::gpio_otyper_descriptor::Flag
+        up = pull_up,
+        down = pull_down,
     };
 
     enum class Mask : std::uint32_t
@@ -183,6 +187,7 @@ private:
      */
     template<typename desc_t> struct Reg_wrc
     {
+        using base_desc_t = desc_t; // Is `base` a suitable prefix for using ?
         enum class Data : std::uint32_t;
 
         Reg_wrc(const volatile Reg_wrc& other_a)
